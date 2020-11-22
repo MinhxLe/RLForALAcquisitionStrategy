@@ -1,0 +1,11 @@
+**.DS_Store
+**egg-info/
+**__pycache__/
+**venv/
+**.coverage
+**.pytest_cache
+**.ipynb_checkpoints/
+**tags/
+**experiments/
+**results/
+**data/
