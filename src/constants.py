@@ -1,0 +1,1 @@
+EXPERIMENTS_RESULT_DIR = 'results'
