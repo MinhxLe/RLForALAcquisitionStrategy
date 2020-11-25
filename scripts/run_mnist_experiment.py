@@ -5,7 +5,8 @@ from src.constants import (
     EXPERIMENTS_RESULT_DIR,
 )
 from src.experiment.mnist_experiment_manager import (
-    ALRandomExperimentManager,
+    RandomExperimentManager,
+    LCExperimentManager
 )
 from datetime import datetime
 
@@ -49,7 +50,9 @@ if args.debug:
 args.experiment_dir = os.path.join(EXPERIMENTS_RESULT_DIR, args.experiment_name)
 
 if args.al_sampler == "random":
-    manager = ALRandomExperimentManager(args)
+    manager = RandomExperimentManager(args)
+elif args.al_sampler == "lc":
+    manager = LCExperimentManager(args)
 else:
     raise NotImplementedError("sampler not implemented")
 

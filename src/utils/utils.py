@@ -1,11 +1,11 @@
 import tensorflow as tf
 
 
-def batch_sample_data(data, batch_size=32, shuffle=True):
-    # TODO DO NOT USE, this is broken
-    dataset = tf.data.Dataset.from_tensors(data)
+def batch_sample_slices(tensor_slices, batch_size=32, shuffle=True):
+    # TODO DO NOT USE for tuples of Tensors
+    dataset = tf.data.Dataset.from_tensor_slices(tensor_slices)
     if shuffle:
-        dataset = dataset.shuffle(len(data), reshuffle_each_iteration=True)
+        dataset = dataset.shuffle(len(tensor_slices), reshuffle_each_iteration=True)
     dataset = dataset.batch(batch_size)
     for batch in dataset.as_numpy_iterator():
         yield batch

@@ -6,11 +6,10 @@ import numpy as np
 import random
 
 from src.utils.utils import (
-    batch_sample_slices,
+    batch_sample_data,
     batch_sample_indices,
 )
 from typing import List
-import numpy as np
 import tensorflow as tf
 
 
@@ -47,6 +46,14 @@ class ALRandomSampler(ActiveLearningSamplerT):
         self.labelled_idx_set |= new_labels
         self.unlabelled_idx_set -= new_labels
         return n_sampled
+
+
+# class LeastConfidenceSampler(ActiveLearningSamplerT):
+#     def label_n_elements(self, n_elements: int) -> int:
+#         n_sampled = min(len(self.unlabelled_idx_set), n_elements)
+#         new_labels = set(random.sample(self.unlabelled_idx_set, n_sampled))
+#         self.labelled_idx_set = self.labelled_idx_set.union(new_labels)
+#         self.unlabelled_idx_set = self.unlabelled_idx_set.difference(new_labels)
 
 
 class FixedHeap:
@@ -94,9 +101,10 @@ class LeastConfidenceSampler(ActiveLearningSamplerT):
         unlabelled_indices = list(self.unlabelled_idx_set)
         heap = FixedHeap(key=lambda x : x[0])
 
-        train_x = self.train_data
+        train_x = self.train_data[0]
+        train_x = self.train_data[unlabelled_indices]
         # we need to keep the original indices
-        for batch_indices in batch_sample_slices(unlabelled_indices, shuffle=False):
+        for batch_indices in batch_sample_data(unlabelled_indices):
             batch_x = train_x[batch_indices]
             prediction = model(batch_x, training=False)
 
@@ -105,15 +113,14 @@ class LeastConfidenceSampler(ActiveLearningSamplerT):
 
             for confidence, index in zip(confidences, batch_indices):
                 if len(heap) < n_to_sample:
-                    # push - confidnece since we want to pop most confident
-                    heap.push((-confidence, index))
+                    heap.push((confidence, index))
                 else:
                     top_confidence, _ = heap.top()
-                    if confidence < -top_confidence:
+                    if confidence < -top_mnlp:
                         heap.pop()
                         heap.push((-confidence, index))
         while len(heap) > 0:
-            _, idx = heap.pop()
+            confidence, idx = heap.pop()
             self.labelled_idx_set.add(idx)
             self.unlabelled_idx_set.remove(idx)
         del heap

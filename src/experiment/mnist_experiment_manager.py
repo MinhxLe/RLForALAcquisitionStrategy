@@ -8,6 +8,7 @@ from sklearn.metrics import f1_score
 from src.model.mnist_model import MNISTModel
 from src.sampler import (
     ALRandomSampler,
+    LeastConfidenceSampler
 )
 from src.utils.log_utils import (
     set_up_experiment_logging,
@@ -164,7 +165,7 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             raw_prediction = model(batch_x, training=False)
             loss_metric(loss_fn(batch_y, raw_prediction))
 
-            prediction = np.int32(raw_prediction>=0.5)
+            prediction = np.int32(raw_prediction>=0)
             prediction_class_ratio_metric(prediction)
             f1_metric(f1_score(batch_y, prediction, average="binary"))
 
@@ -249,7 +250,7 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         # results_df.to_csv(os.path.join(self.experiment_dir, "test_results.csv"))
 
 
-class ALRandomExperimentManager(ActiveLearningExperimentManagerT):
+class RandomExperimentManager(ActiveLearningExperimentManagerT):
 
     def _get_sampler(self):
         return ALRandomSampler(len(self.train_data[0]))
@@ -257,10 +258,11 @@ class ALRandomExperimentManager(ActiveLearningExperimentManagerT):
     def label_n_elements(self, sampler, n_elements):
         sampler.label_n_elements(n_elements)
 
-# class MNLPExperimentManager(ActiveLearningExperimentManagerT):
 
-#     def _get_sampler(self):
-#         return MNLPSampler(self.train_data)
+class LCExperimentManager(ActiveLearningExperimentManagerT):
 
-#     def label_n_elements(self, sampler, n_elements):
-#         self.sampler.label_n_elements(n_elements, self.model)
+    def _get_sampler(self):
+        return LeastConfidenceSampler(self.train_data[0])
+
+    def label_n_elements(self, sampler, n_elements):
+        sampler.label_n_elements(n_elements, self.model)
