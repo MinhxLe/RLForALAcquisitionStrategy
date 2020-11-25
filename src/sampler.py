@@ -1,6 +1,3 @@
-"""
-LIFTED FROM https://dagshub.com/ActuallyOpenAI/goingBALD
-"""
 import heapq
 import numpy as np
 import random
@@ -118,3 +115,57 @@ class LeastConfidenceSampler(ActiveLearningSamplerT):
             self.unlabelled_idx_set.remove(idx)
         del heap
         return n_to_sample
+
+
+class UCBBanditSampler(ActiveLearningSamplerT):
+    def __init__(self, train_data):
+        self.n_elements = len(train_data)
+        super().__init__(self.n_elements)
+        self.samplers = [
+            ALRandomSampler(self.n_elements),
+            LeastConfidenceSampler(train_data)
+        ]
+        # we make sure we share the same set
+        for sampler in self.samplers:
+            sampler.unlabelled_idx_set = (
+                self.unlabelled_idx_set)
+            sampler.labelled_idx_set = (
+                self.labelled_idx_set)
+        self.n_samplers = len(self.samplers)
+
+        self.q_value = np.zeros(self.n_samplers)
+        self.arm_count = np.zeros(self.n_samplers)
+        self.total_arm_count = 0
+
+    def get_action(self, arm: int) -> str:
+        return self.samplers[arm].__class__.__name__
+
+    def label_n_elements(
+            self,
+            n_elements: int,
+            model) -> (int, int):
+        # https://lilianweng.github.io/lil-log/2018/01/23/the-multi-armed-bandit-problem-and-its-solutions.html#ucb1
+        # UCB 1 algorithm stolen here
+        # if there are any actions that we have not tried, we randomly selection an action
+        indices = np.where(self.arm_count == 0)[0]
+        if len(indices) > 0:
+            arm = np.random.choice(indices)
+        else:
+            exploration = (2*np.math.log(self.total_arm_count)/self.arm_count)**(0.5)
+            ucb = self.q_value + exploration
+            arm = np.argmax(ucb)
+
+        sampler_selected = self.samplers[arm]
+        # TODO add logging of which arm selected
+        if isinstance(sampler_selected, ALRandomSampler):
+            n_labeled = sampler_selected.label_n_elements(n_elements)
+        if isinstance(sampler_selected, LeastConfidenceSampler):
+            n_labeled = sampler_selected.label_n_elements(n_elements, model)
+        return arm, n_labeled
+
+    def update_q_value(self, arm: int, reward: float) -> None:
+        self.total_arm_count += 1
+        self.arm_count[arm] += 1
+        # running avg
+        # TODO we can probably can do more aggressive score decay
+        self.q_value[arm] += (reward - self.q_value[arm])/self.arm_count[arm]

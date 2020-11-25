@@ -6,7 +6,8 @@ from src.constants import (
 )
 from src.experiment.mnist_experiment_manager import (
     RandomExperimentManager,
-    LCExperimentManager
+    LCExperimentManager,
+    UCBBanditExperimentManager
 )
 from datetime import datetime
 
@@ -39,13 +40,15 @@ args = parser.parse_args()
 timestamp_str = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
 # TODO add other arguments
 if not args.experiment_name:
-    args.experiment_name = f"mnist_{args.al_sampler}_sampler_{timestamp_str}"
+    args.experiment_name = f"mnist_{args.al_sampler}_sampler"
 
 if args.debug:
     args.experiment_name += "_DEBUG"
     args.train_epochs = 1
     args.batch_size = 5
     args.al_epochs = 5
+else:
+    args.experiment_name += timestamp_str
 
 args.experiment_dir = os.path.join(EXPERIMENTS_RESULT_DIR, args.experiment_name)
 
@@ -53,6 +56,8 @@ if args.al_sampler == "random":
     manager = RandomExperimentManager(args)
 elif args.al_sampler == "lc":
     manager = LCExperimentManager(args)
+elif args.al_sampler == 'ucb_bandit':
+    manager = UCBBanditExperimentManager(args)
 else:
     raise NotImplementedError("sampler not implemented")
 

@@ -8,7 +8,8 @@ from sklearn.metrics import f1_score
 from src.model.mnist_model import MNISTModel
 from src.sampler import (
     ALRandomSampler,
-    LeastConfidenceSampler
+    LeastConfidenceSampler,
+    UCBBanditSampler
 )
 from src.utils.log_utils import (
     set_up_experiment_logging,
@@ -266,3 +267,169 @@ class LCExperimentManager(ActiveLearningExperimentManagerT):
 
     def label_n_elements(self, sampler, n_elements):
         sampler.label_n_elements(n_elements, self.model)
+
+
+class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
+
+    def _get_sampler(self):
+        return UCBBanditSampler(self.train_data[0])
+
+    def label_n_elements(self, sampler, n_elements):
+        return sampler.label_n_elements(n_elements, self.model)
+
+    def get_labelled_train_data(self, sampler):
+        labelled_indices = list(sampler.labelled_idx_set)
+        train_x = self.train_data[0][labelled_indices]
+        train_y = self.train_data[1][labelled_indices]
+        return (train_x, train_y)
+
+    def train_model_step(self, data):
+        """
+        single pass of labelled train data
+        """
+        # TODO we don't retrain here, is that sensible?
+        model = self.model
+        args = self.args
+        logger = self.logger
+        optimizer = self.optimizer
+        loss_fn = self.loss_fn
+
+        total_loss = 0
+        count = 0
+        elapsed = None
+        train_x, train_y = data
+        data_size = len(train_x)
+        for idx, batch in enumerate(batch_sample_indices(data_size, batch_size=args.batch_size)):
+            batch_x, batch_y = train_x[batch], train_y[batch]
+            with tf.GradientTape() as tape:
+                prediction = model(batch_x)
+                loss = loss_fn(batch_y, prediction)
+                grads = tape.gradient(loss, model.trainable_variables)
+                optimizer.apply_gradients(zip(grads, model.trainable_variables))
+            total_loss += loss.numpy()
+            count += len(batch_x)
+
+            if self.start_time:
+                elapsed = time.monotonic() - self.start_time
+            if args.train_log_interval > 0 and (idx+1) % args.train_log_interval == 0:
+                cur_loss = total_loss / count
+                logger.info(f"Batch: {(idx+1)*args.batch_size}/{data_size}"
+                        f"\tLoss: {cur_loss}"
+                        f"\tElapsed Time: {time_display(elapsed)}")
+                total_loss = 0
+                count = 0
+
+    def evaluate_model_step(self, data):
+        args = self.args
+        model = self.model
+        logger = self.logger
+        optimizer = self.optimizer
+        loss_fn = self.loss_fn
+
+        loss_metric = tf.keras.metrics.Mean(name="loss")
+        f1_metric = tf.keras.metrics.Mean(name="f1_metric")
+        prediction_class_ratio_metric = tf.keras.metrics.Mean(name="prediction_ratio")
+
+        test_x, test_y = data
+        data_size = len(test_x)
+        total_f1_score = 0
+        total_batch_count = 0
+        total_num_positive = 0
+
+        for idx, test_batch in enumerate(
+                batch_sample_indices(data_size, batch_size=args.batch_size)):
+            batch_x, batch_y = test_x[test_batch], test_y[test_batch]
+            raw_prediction = model(batch_x, training=False)
+            loss_metric(loss_fn(batch_y, raw_prediction))
+
+            prediction = np.int32(raw_prediction>=0)
+            prediction_class_ratio_metric(prediction)
+            f1_metric(f1_score(batch_y, prediction, average="binary"))
+
+        return {
+            "loss": loss_metric.result(),
+            "f1_score": f1_metric.result(),
+            "class_prediction_ratio": prediction_class_ratio_metric.result(),
+        }
+
+
+    def run_experiment(self):
+        self.start_time = time.monotonic()
+        start_time = self.start_time
+        args = self.args
+        train_data = self.train_data
+        test_data = self.test_data
+        logger = self.logger
+        AL_sampler = self._get_sampler()
+
+        labelled_indices = set()
+
+        logger.info(f"Starting {args.experiment_name} experiment")
+        n_labels = len(train_data[0])//args.al_epochs
+        train_dataset_size = len(train_data[0])
+        previous_f1_score = 0
+        try:
+            # TODO bug of missing final count of labelled
+            for curr_AL_epoch in range(args.al_epochs):
+                # AL step
+                arm, _ = self.label_n_elements(AL_sampler, n_labels)
+                labelled_indices = AL_sampler.labelled_idx_set
+                n_labeled = len(labelled_indices)
+
+
+
+                logger.info("-" * 118)
+                logger.info(
+                        f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
+                        f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
+                        f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+
+                # add metric of arm used
+                logger.info(f"Selected {AL_sampler.get_action(arm)} arm")
+                with self.tf_summary_writer.as_default():
+                    tf.summary.scalar("acquisition arm selected", arm, step=n_labeled)
+
+
+                # train step
+                train_data = self.get_labelled_train_data(AL_sampler)
+                for epoch in range(1, args.train_epochs+1):
+                    logger.info(f"Train Epoch: {epoch}/{args.train_epochs}"
+                                f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+                    self.train_model_step(train_data)
+
+                # final train loss (full data)
+                train_metrics = self.evaluate_model_step(train_data)
+                with self.tf_summary_writer.as_default():
+
+                    for metric_key, metric_value in train_metrics.items():
+                        tf.summary.scalar(f"train {metric_key}", metric_value, step=n_labeled)
+
+                # validation step
+                test_metrics = self.evaluate_model_step(test_data)
+                log_str = (
+                    f"AL Epoch:{curr_AL_epoch}/{args.al_epochs}"
+                    f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}")
+                for metric_key, metric_value in test_metrics.items():
+                    log_str += f"\tTest {metric_key}: {metric_value}"
+                log_str += f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"
+
+                logger.info(log_str)
+                with self.tf_summary_writer.as_default():
+                    for metric_key, metric_value in test_metrics.items():
+                        tf.summary.scalar(f"test {metric_key}", metric_value, step=n_labeled)
+
+                # update sampler
+                # reward is delta train f1 metric
+                AL_sampler.update_q_value(arm, train_metrics["f1_score"] - previous_f1_score)
+                previous_f1_score = train_metrics["f1_score"]
+                # TODO maybe add UCB estimate over time
+
+                # save model
+                if (args.save_model_interval > 0 and
+                    ((curr_AL_epoch+1) % args.save_model_interval == 0)):
+                    model_fpath = os.path.join(
+                        self.model_snapshot_dir,
+                        f"model_AL_epoch_{curr_AL_epoch}_{args.al_epochs}.ckpt")
+                    self.model.save_weights(model_fpath)
+        except KeyboardInterrupt:
+            logger.warning('Exiting from training early!')
