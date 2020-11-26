@@ -84,6 +84,7 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             args.model_num_filters,
             args.model_filter_size,
             args.model_pool_size,
+            args.model_num_classes,
         )
 
     def _get_optimizer(self):

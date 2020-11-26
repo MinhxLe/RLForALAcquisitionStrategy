@@ -6,6 +6,7 @@ class MNISTModel(tf.keras.Model):
             num_filters=8,
             filter_size=3,
             pool_size=2,
+            num_classes=10,
             ):
         super().__init__()
         # TODO move hyperparemters of model out to training script
@@ -13,7 +14,7 @@ class MNISTModel(tf.keras.Model):
             tf.keras.layers.Conv2D(num_filters, filter_size, input_shape=(28, 28, 1)),
             tf.keras.layers.MaxPooling2D(pool_size=pool_size),
             tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(10),
+            tf.keras.layers.Dense(num_classes),
             ]
         )
 
