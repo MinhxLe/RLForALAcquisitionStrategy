@@ -13,7 +13,7 @@ class MNISTModel(tf.keras.Model):
             tf.keras.layers.Conv2D(num_filters, filter_size, input_shape=(28, 28, 1)),
             tf.keras.layers.MaxPooling2D(pool_size=pool_size),
             tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(1),
+            tf.keras.layers.Dense(10),
             ]
         )
 

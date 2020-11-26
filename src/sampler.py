@@ -98,7 +98,11 @@ class LeastConfidenceSampler(ActiveLearningSamplerT):
             prediction = model(batch_x, training=False)
 
             # we get absolute value of prediction logit which is how confident
-            confidences = tf.math.abs(prediction)
+            # confidences = tf.math.abs(prediction)
+            # multiclassifier confidence
+            prediction = tf.nn.softmax(prediction)
+            confidences = tf.math.reduce_max(prediction, axis=0)
+
 
             for confidence, index in zip(confidences, batch_indices):
                 if len(heap) < n_to_sample:

@@ -57,9 +57,13 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         # normalizes the features
         x_train, x_test = x_train[..., np.newaxis]/255.0, x_test[..., np.newaxis]/255.0
 
+        # change to 1 hot
+        y_train = np.eye(self.args.model_num_classes)[y_train]
+        y_test = np.eye(self.args.model_num_classes)[y_test]
+
         # changing to binary classifier
-        y_train = np.expand_dims((y_train==9).astype(np.int32), 1)
-        y_test = np.expand_dims((y_test==9).astype(np.int32), 1)
+        # y_train = np.expand_dims((y_train==9).astype(np.int32), 1)
+        # y_test = np.expand_dims((y_test==9).astype(np.int32), 1)
 
         # TODO fix
         if self.args.debug:
@@ -89,7 +93,10 @@ class ActiveLearningExperimentManagerT(abc.ABC):
     def _get_loss(self):
         # TODO switch to BinaryCrossentropy
         # weight the class(?)
-        return tf.keras.losses.BinaryCrossentropy(
+        # return tf.keras.losses.BinaryCrossentropy(
+        #     from_logits=True,
+        #     reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
+        return tf.keras.losses.CategoricalCrossentropy(
             from_logits=True,
             reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
 
@@ -152,7 +159,6 @@ class ActiveLearningExperimentManagerT(abc.ABC):
 
         loss_metric = tf.keras.metrics.Mean(name="loss")
         f1_metric = tf.keras.metrics.Mean(name="f1_metric")
-        prediction_class_ratio_metric = tf.keras.metrics.Mean(name="prediction_ratio")
 
         test_x, test_y = data
         data_size = len(test_x)
@@ -160,20 +166,42 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         total_batch_count = 0
         total_num_positive = 0
 
+        total_prediction_count = np.zeros(args.model_num_classes)
+        total_true_label_count = np.zeros(args.model_num_classes)
         for idx, test_batch in enumerate(
                 batch_sample_indices(data_size, batch_size=args.batch_size)):
             batch_x, batch_y = test_x[test_batch], test_y[test_batch]
             raw_prediction = model(batch_x, training=False)
             loss_metric(loss_fn(batch_y, raw_prediction))
 
-            prediction = np.int32(raw_prediction>=0)
-            prediction_class_ratio_metric(prediction)
-            f1_metric(f1_score(batch_y, prediction, average="binary"))
+
+            prediction = np.argmax(raw_prediction, axis=1)
+            unique, counts = np.unique(prediction, return_counts=True)
+            for i, count in zip(unique, counts):
+                total_prediction_count[i] += count
+
+            batch_y = np.argmax(batch_y, axis=1)  # 1 hot to class
+            unique, counts = np.unique(batch_y, return_counts=True)
+            for i, count in zip(unique, counts):
+                total_true_label_count[i] += count
+
+            f1_metric(f1_score(batch_y, prediction, average="micro"))
+
+        # min class ratio
+        min_class_prediction_ratio = np.min(total_prediction_count)/len(test_y)
+        min_true_class_ratio = np.min(total_true_label_count)/len(test_y)
+
+        # max class ratio
+        max_class_prediction_ratio = np.max(total_prediction_count)/len(test_y)
+        max_true_class_ratio = np.max(total_true_label_count)/len(test_y)
 
         return {
             "loss": loss_metric.result(),
             "f1_score": f1_metric.result(),
-            "class_prediction_ratio": prediction_class_ratio_metric.result(),
+            "min_class_prediction_ratio": min_class_prediction_ratio,
+            "min_true_class_ratio": min_true_class_ratio,
+            "max_class_prediction_ratio": max_class_prediction_ratio,
+            "max_true_class_ratio": max_true_class_ratio,
         }
 
 
@@ -189,13 +217,13 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         labelled_indices = set()
 
         logger.info(f"Starting {args.experiment_name} experiment")
-        n_labels = len(train_data[0])//args.al_epochs
+        n_to_label = int(len(train_data[0]) * args.al_step_percentage)
         train_dataset_size = len(train_data[0])
         try:
             # TODO bug of missing final count of labelled
             for curr_AL_epoch in range(args.al_epochs):
                 # AL step
-                self.label_n_elements(AL_sampler, n_labels)
+                self.label_n_elements(AL_sampler, n_to_label)
                 labelled_indices = AL_sampler.labelled_idx_set
                 n_labeled = len(labelled_indices)
 
@@ -218,19 +246,17 @@ class ActiveLearningExperimentManagerT(abc.ABC):
                     for metric_key, metric_value in metrics.items():
                         tf.summary.scalar(f"train {metric_key}", metric_value, step=n_labeled)
 
-                # validation step
+                # test metrics
                 metrics = self.evaluate_model_step(test_data)
-                log_str = (
-                    f"AL Epoch:{curr_AL_epoch}/{args.al_epochs}"
-                    f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}")
+                logger.info((
+                    f"Train Data Labeled: {n_labeled}/{train_dataset_size}"
+                    f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"))
                 for metric_key, metric_value in metrics.items():
-                    log_str += f"\tTest {metric_key}: {metric_value}"
-                log_str += f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"
-
-                logger.info(log_str)
+                    logger.info(f"Test {metric_key}: {metric_value}")
                 with self.tf_summary_writer.as_default():
                     for metric_key, metric_value in metrics.items():
                         tf.summary.scalar(f"test {metric_key}", metric_value, step=n_labeled)
+
                 # save model
                 if (args.save_model_interval > 0 and
                     ((curr_AL_epoch+1) % args.save_model_interval == 0)):
@@ -241,8 +267,7 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         except KeyboardInterrupt:
             logger.warning('Exiting from training early!')
 
-        # TODO add train losses
-        # TODO extract out
+        # TODO save metrics as csv
         # n = np.min((len(labelled_data_counts), len(test_f1_scores), len(test_losses)))
         # results_df = pd.DataFrame.from_dict({
         #     "labelled_data_counts": labelled_data_counts[:n],
@@ -277,82 +302,6 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
     def label_n_elements(self, sampler, n_elements):
         return sampler.label_n_elements(n_elements, self.model)
 
-    def get_labelled_train_data(self, sampler):
-        labelled_indices = list(sampler.labelled_idx_set)
-        train_x = self.train_data[0][labelled_indices]
-        train_y = self.train_data[1][labelled_indices]
-        return (train_x, train_y)
-
-    def train_model_step(self, data):
-        """
-        single pass of labelled train data
-        """
-        # TODO we don't retrain here, is that sensible?
-        model = self.model
-        args = self.args
-        logger = self.logger
-        optimizer = self.optimizer
-        loss_fn = self.loss_fn
-
-        total_loss = 0
-        count = 0
-        elapsed = None
-        train_x, train_y = data
-        data_size = len(train_x)
-        for idx, batch in enumerate(batch_sample_indices(data_size, batch_size=args.batch_size)):
-            batch_x, batch_y = train_x[batch], train_y[batch]
-            with tf.GradientTape() as tape:
-                prediction = model(batch_x)
-                loss = loss_fn(batch_y, prediction)
-                grads = tape.gradient(loss, model.trainable_variables)
-                optimizer.apply_gradients(zip(grads, model.trainable_variables))
-            total_loss += loss.numpy()
-            count += len(batch_x)
-
-            if self.start_time:
-                elapsed = time.monotonic() - self.start_time
-            if args.train_log_interval > 0 and (idx+1) % args.train_log_interval == 0:
-                cur_loss = total_loss / count
-                logger.info(f"Batch: {(idx+1)*args.batch_size}/{data_size}"
-                        f"\tLoss: {cur_loss}"
-                        f"\tElapsed Time: {time_display(elapsed)}")
-                total_loss = 0
-                count = 0
-
-    def evaluate_model_step(self, data):
-        args = self.args
-        model = self.model
-        logger = self.logger
-        optimizer = self.optimizer
-        loss_fn = self.loss_fn
-
-        loss_metric = tf.keras.metrics.Mean(name="loss")
-        f1_metric = tf.keras.metrics.Mean(name="f1_metric")
-        prediction_class_ratio_metric = tf.keras.metrics.Mean(name="prediction_ratio")
-
-        test_x, test_y = data
-        data_size = len(test_x)
-        total_f1_score = 0
-        total_batch_count = 0
-        total_num_positive = 0
-
-        for idx, test_batch in enumerate(
-                batch_sample_indices(data_size, batch_size=args.batch_size)):
-            batch_x, batch_y = test_x[test_batch], test_y[test_batch]
-            raw_prediction = model(batch_x, training=False)
-            loss_metric(loss_fn(batch_y, raw_prediction))
-
-            prediction = np.int32(raw_prediction>=0)
-            prediction_class_ratio_metric(prediction)
-            f1_metric(f1_score(batch_y, prediction, average="binary"))
-
-        return {
-            "loss": loss_metric.result(),
-            "f1_score": f1_metric.result(),
-            "class_prediction_ratio": prediction_class_ratio_metric.result(),
-        }
-
-
     def run_experiment(self):
         self.start_time = time.monotonic()
         start_time = self.start_time
@@ -365,31 +314,29 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
         labelled_indices = set()
 
         logger.info(f"Starting {args.experiment_name} experiment")
-        n_labels = len(train_data[0])//args.al_epochs
+        n_to_label = int(len(train_data[0]) * args.al_step_percentage)
         train_dataset_size = len(train_data[0])
         previous_f1_score = 0
         try:
             # TODO bug of missing final count of labelled
             for curr_AL_epoch in range(args.al_epochs):
                 # AL step
-                arm, _ = self.label_n_elements(AL_sampler, n_labels)
+                arm, _ = self.label_n_elements(AL_sampler, n_to_label)
                 labelled_indices = AL_sampler.labelled_idx_set
                 n_labeled = len(labelled_indices)
 
-
+                # arm selected
+                with self.tf_summary_writer.as_default():
+                    tf.summary.scalar("Arm selected", arm, step=n_labeled)
+                    for i, arm_count in enumerate(AL_sampler.arm_count):
+                        tf.summary.scalar(f"{AL_sampler.get_action(i)} arm count", arm_count, step=n_labeled)
+                logger.info(f"selected {AL_sampler.get_action(arm)}")
 
                 logger.info("-" * 118)
                 logger.info(
                         f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
                         f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
                         f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
-
-                # add metric of arm used
-                logger.info(f"Selected {AL_sampler.get_action(arm)} arm")
-                with self.tf_summary_writer.as_default():
-                    tf.summary.scalar("acquisition arm selected", arm, step=n_labeled)
-
-
                 # train step
                 train_data = self.get_labelled_train_data(AL_sampler)
                 for epoch in range(1, args.train_epochs+1):
@@ -404,18 +351,15 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
                     for metric_key, metric_value in train_metrics.items():
                         tf.summary.scalar(f"train {metric_key}", metric_value, step=n_labeled)
 
-                # validation step
-                test_metrics = self.evaluate_model_step(test_data)
-                log_str = (
-                    f"AL Epoch:{curr_AL_epoch}/{args.al_epochs}"
-                    f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}")
-                for metric_key, metric_value in test_metrics.items():
-                    log_str += f"\tTest {metric_key}: {metric_value}"
-                log_str += f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"
-
-                logger.info(log_str)
+                # test metrics
+                metrics = self.evaluate_model_step(test_data)
+                logger.info((
+                    f"Train Data Labeled: {n_labeled}/{train_dataset_size}"
+                    f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"))
+                for metric_key, metric_value in metrics.items():
+                    logger.info(f"Test {metric_key}: {metric_value}")
                 with self.tf_summary_writer.as_default():
-                    for metric_key, metric_value in test_metrics.items():
+                    for metric_key, metric_value in metrics.items():
                         tf.summary.scalar(f"test {metric_key}", metric_value, step=n_labeled)
 
                 # update sampler
@@ -423,8 +367,8 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
                 AL_sampler.update_q_value(arm, train_metrics["f1_score"] - previous_f1_score)
                 previous_f1_score = train_metrics["f1_score"]
                 # TODO maybe add UCB estimate over time
-
                 # save model
+
                 if (args.save_model_interval > 0 and
                     ((curr_AL_epoch+1) % args.save_model_interval == 0)):
                     model_fpath = os.path.join(

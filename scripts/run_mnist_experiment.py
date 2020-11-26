@@ -16,11 +16,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--model_num_filters', type=int, default=8)
 parser.add_argument('--model_filter_size', type=int, default=3)
 parser.add_argument('--model_pool_size', type=int, default=2)
+parser.add_argument('--model_num_classes', type=int, default=10)
 
 # AL args
 # TODO add initial seed data percentage
 parser.add_argument('--al_sampler', type=str)
-parser.add_argument('--al_epochs', type=int, default=50)
+parser.add_argument('--al_epochs', type=int, default=20)
+parser.add_argument('--al_step_percentage',type=float, default=0.001, help="percentage of data to be labelled per timestep")
 
 # train args
 parser.add_argument('--batch_size', type=int, default=32)
@@ -47,10 +49,14 @@ if args.debug:
     args.train_epochs = 1
     args.batch_size = 5
     args.al_epochs = 5
+    args.al_step_percentage = (1.0/args.al_epochs)
+    args.experiment_dir = os.path.join(EXPERIMENTS_RESULT_DIR, "DEBUG")
 else:
-    args.experiment_name += timestamp_str
-
-args.experiment_dir = os.path.join(EXPERIMENTS_RESULT_DIR, args.experiment_name)
+    args.experiment_name += f"_{timestamp_str}"
+    args.experiment_dir = os.path.join(
+            EXPERIMENTS_RESULT_DIR,
+            f"mnist_classification_{args.al_step_percentage}_data_per_step",
+            args.experiment_name)
 
 if args.al_sampler == "random":
     manager = RandomExperimentManager(args)
@@ -64,5 +70,3 @@ else:
 with open(os.path.join(args.experiment_dir, "experiment_args.txt"), 'w') as f:
     json.dump(args.__dict__, f, indent=2)
 manager.run_experiment()
-
-
