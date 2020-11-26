@@ -21,8 +21,8 @@ parser.add_argument('--model_num_classes', type=int, default=10)
 # AL args
 # TODO add initial seed data percentage
 parser.add_argument('--al_sampler', type=str)
-parser.add_argument('--al_epochs', type=int, default=20)
-parser.add_argument('--al_step_percentage',type=float, default=0.001, help="percentage of data to be labelled per timestep")
+parser.add_argument('--al_epochs', type=int, default=50)
+parser.add_argument('--al_step_percentage',type=float, default=0.0005, help="percentage of data to be labelled per timestep")
 
 # train args
 parser.add_argument('--batch_size', type=int, default=32)
