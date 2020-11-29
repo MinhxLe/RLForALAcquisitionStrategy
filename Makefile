@@ -1,7 +1,8 @@
-.PHONY: clean_results, clean_recent_experiment
+.PHONY: clean_recent_experiment, clean_debug
 
-clean_results:
-	rm -rf results/*
 
 clean_recent_experiment:
 	ls -td results/* | head -n 1 | xargs rm -r
+
+clean_debug:
+	rm -rf results/DEBUG/*

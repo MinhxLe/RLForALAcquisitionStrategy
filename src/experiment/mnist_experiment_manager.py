@@ -1,8 +1,10 @@
 import abc
+import csv
 import os
 import time
 import tensorflow as tf
 import numpy as np
+from datetime import datetime
 from sklearn.metrics import f1_score
 
 from src.model.mnist_model import MNISTModel
@@ -19,6 +21,7 @@ from src.utils.utils import (
     batch_sample_indices,
 )
 
+
 class ActiveLearningExperimentManagerT(abc.ABC):
     """
     - handles managing data set
@@ -28,42 +31,60 @@ class ActiveLearningExperimentManagerT(abc.ABC):
     """
     def __init__(self, args):
         self.args = args
-
-        if not os.path.exists(args.experiment_dir):
-            os.makedirs(args.experiment_dir)
-
-        self.logger, self.tf_summary_writer, self.model_snapshot_dir = (
-            set_up_experiment_logging(
-                args.experiment_name,
-                log_fpath=os.path.join(args.experiment_dir, "experiment.log"),
-                model_snapshot_dir=os.path.join(args.experiment_dir, "model_snapshots"),
-                metrics_dir=os.path.join(args.experiment_dir, "metrics"),
-                stdout=args.stdout,
-                clear_old_data=True,
-            )
-        )
-        self.start_time = None
+        # these don't change run to run
         self._init_data()
-        self.model = self._get_model()
         self.optimizer = self._get_optimizer()
         self.loss_fn = self._get_loss()
-        # seed random
+
+        # we only seed once
         tf.random.set_seed(args.seed)
         np.random.seed(args.seed)
 
+        # these are none until you call _init_experiment
+        self.logger = None
+        self.tf_summary_writer = None
+        self.model = None
+        self.start_time = None
+        self.run_dir = None
+        self.AL_sampler = None
+
     def _init_data(self) -> None:
+        args = self.args
+
         # loads from keras cache
         (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
         # normalizes the features
         x_train, x_test = x_train[..., np.newaxis]/255.0, x_test[..., np.newaxis]/255.0
 
-        # change to 1 hot
-        y_train = np.eye(self.args.model_num_classes)[y_train]
-        y_test = np.eye(self.args.model_num_classes)[y_test]
+        def build_rare_class_dataset(data, rare_class, rare_class_percentage):
+            x, y = data
+            # keep nonrare class data as is
+            x_non_rare = x[y!=rare_class]
+            y_non_rare = y[y!=rare_class]
 
-        # changing to binary classifier
-        # y_train = np.expand_dims((y_train==9).astype(np.int32), 1)
-        # y_test = np.expand_dims((y_test==9).astype(np.int32), 1)
+            # in test and training, we make 1 of the classes really rare
+            unique, counts = np.unique(y, return_counts=True)
+            rare_class_count = counts[unique==rare_class]
+            count_to_keep = int(rare_class_count * rare_class_percentage)
+            x_rare = x[y==rare_class][:count_to_keep]
+            y_rare = y[y==rare_class][:count_to_keep]
+
+            return (np.concatenate((x_non_rare, x_rare)),
+                    np.concatenate((y_non_rare, y_rare)))
+
+        x_train, y_train = build_rare_class_dataset(
+            (x_train, y_train),
+            args.rare_class,
+            args.rare_class_percentage)
+
+        x_test, y_test = build_rare_class_dataset(
+            (x_test, y_test),
+            args.rare_class,
+            args.rare_class_percentage)
+
+        # change to 1 hot
+        y_train = np.eye(args.model_num_classes)[y_train]
+        y_test = np.eye(args.model_num_classes)[y_test]
 
         # TODO fix
         if self.args.debug:
@@ -159,16 +180,15 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         loss_fn = self.loss_fn
 
         loss_metric = tf.keras.metrics.Mean(name="loss")
-        f1_metric = tf.keras.metrics.Mean(name="f1_metric")
+        aggregate_f1_metric = tf.keras.metrics.Mean(name="f1_metric")
+        rare_class_f1_metric = tf.keras.metrics.Mean(name="rare_f1_metric")
 
         test_x, test_y = data
         data_size = len(test_x)
-        total_f1_score = 0
-        total_batch_count = 0
-        total_num_positive = 0
 
         total_prediction_count = np.zeros(args.model_num_classes)
         total_true_label_count = np.zeros(args.model_num_classes)
+        rare_class_count = 0
         for idx, test_batch in enumerate(
                 batch_sample_indices(data_size, batch_size=args.batch_size)):
             batch_x, batch_y = test_x[test_batch], test_y[test_batch]
@@ -186,96 +206,152 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             for i, count in zip(unique, counts):
                 total_true_label_count[i] += count
 
-            f1_metric(f1_score(batch_y, prediction, average="micro"))
+            aggregate_f1_metric(
+                f1_score(batch_y, prediction, average="micro", labels=np.arange(10)))
 
-        # min class ratio
-        min_class_prediction_ratio = np.min(total_prediction_count)/len(test_y)
-        min_true_class_ratio = np.min(total_true_label_count)/len(test_y)
+            rare_class_f1_metric(
+                f1_score(batch_y, prediction, average=None, labels=np.arange(10))[args.rare_class])
+            rare_class_count += len(batch_y[batch_y==args.rare_class])
 
-        # max class ratio
-        max_class_prediction_ratio = np.max(total_prediction_count)/len(test_y)
-        max_true_class_ratio = np.max(total_true_label_count)/len(test_y)
+        # # min class ratio
+        # min_class_prediction_ratio = np.min(total_prediction_count)/data_size
+        # min_class_true_ratio = np.min(total_true_label_count)/data_size
+
+        # # max class ratio
+        # max_class_prediction_ratio = np.max(total_prediction_count)/data_size
+        # max_class_true_ratio = np.max(total_true_label_count)/data_size
+
+        # rare class ratio
+        rare_class_prediction_ratio = total_prediction_count[args.rare_class]/data_size
+        rare_class_true_ratio = total_true_label_count[args.rare_class]/data_size
 
         return {
             "loss": loss_metric.result(),
-            "f1_score": f1_metric.result(),
-            "min_class_prediction_ratio": min_class_prediction_ratio,
-            "min_true_class_ratio": min_true_class_ratio,
-            "max_class_prediction_ratio": max_class_prediction_ratio,
-            "max_true_class_ratio": max_true_class_ratio,
+            "aggregate_f1_metric": aggregate_f1_metric.result(),
+            "rare_class_f1_metric": rare_class_f1_metric.result(),
+            # "min_class_prediction_ratio": min_class_prediction_ratio,
+            # "min_class_true_ratio": min_class_true_ratio,
+            # "max_class_prediction_ratio": max_class_prediction_ratio,
+            # "max_class_true_ratio": max_class_true_ratio,
+            # "max_class_prediction_ratio": max_class_prediction_ratio,
+            # "max_class_true_ratio": max_class_true_ratio,
+            "rare_class_prediction_ratio": rare_class_prediction_ratio,
+            "rare_class_true_ratio": rare_class_true_ratio,
+            "rare_class_count": rare_class_count,
         }
+
+    def log_metrics(
+            self,
+            metrics,
+            step: int,  # training step (number data point labeled)
+            data_type: str,  # test, train
+            ):
+        # we copy to make mit immutable
+        metrics = metrics.copy()
+        # metric output
+        with self.tf_summary_writer.as_default():
+            for metric_key, metric_value in metrics.items():
+                tf.summary.scalar(f"{data_type} {metric_key}", metric_value, step=step)
+        # log output
+        for metric_key, metric_value in metrics.items():
+            self.logger.info(f"{data_type} {metric_key}: {metric_value}")
+
+        # log output, tensorboard output, save to a master csv
+        # TODO keep this open for faster run
+        metrics["step"] = step
+        # we cast to float before storing to csv
+        for metric_key, metric_value in metrics.items():
+            metrics[metric_key] = float(metric_value)
+        csv_file = os.path.join(self.run_dir, f"{data_type}_results.csv")
+        with open(csv_file, 'a') as f:
+            writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
+            if f.tell() == 0:
+                writer.writeheader()
+            writer.writerow(metrics)
 
 
     def run_experiment(self):
+        try:
+            for _ in range(self.args.n_experiment_runs):
+                try:
+                    self._init_experiment()
+                    self._run_experiment()
+                except:
+                    self.logger.warning("RUN FAILED")
+                    print("RUN FAILED")
+        except KeyboardInterrupt:
+            self.logger.warning('Exiting from training early!')
+
+    def _init_experiment(self):
+        args = self.args
+
+        #using timestamp as unique identifier for run
+        timestamp_str = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        self.run_dir = os.path.join(args.experiment_dir, timestamp_str)
+        if not os.path.exists(self.run_dir):
+            os.makedirs(self.run_dir)
+
+        # setting logs, tf sumary writer and some
+        self.logger, self.tf_summary_writer, self.model_snapshot_dir = (
+            set_up_experiment_logging(
+                args.experiment_name,
+                log_fpath=os.path.join(self.run_dir, "experiment.log"),
+                model_snapshot_dir=os.path.join(self.run_dir, "model_snapshots"),
+                metrics_dir=os.path.join(self.run_dir, "metrics"),
+                stdout=args.stdout,
+                clear_old_data=True,
+            )
+        )
+        self.model = self._get_model()
+        self.AL_sampler = self._get_sampler()
         self.start_time = time.monotonic()
+
+    def _run_experiment(self):
         start_time = self.start_time
         args = self.args
         train_data = self.train_data
         test_data = self.test_data
         logger = self.logger
-        AL_sampler = self._get_sampler()
+        AL_sampler = self.AL_sampler
 
         labelled_indices = set()
 
         logger.info(f"Starting {args.experiment_name} experiment")
         n_to_label = int(len(train_data[0]) * args.al_step_percentage)
         train_dataset_size = len(train_data[0])
-        try:
-            # TODO bug of missing final count of labelled
-            for curr_AL_epoch in range(args.al_epochs):
-                # AL step
-                self.label_n_elements(AL_sampler, n_to_label)
-                labelled_indices = AL_sampler.labelled_idx_set
-                n_labeled = len(labelled_indices)
 
-                logger.info("-" * 118)
-                logger.info(
-                        f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
-                        f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
-                        f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
-                # train step
-                train_data = self.get_labelled_train_data(AL_sampler)
-                for epoch in range(1, args.train_epochs+1):
-                    logger.info(f"Train Epoch: {epoch}/{args.train_epochs}"
-                                f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
-                    self.train_model_step(train_data)
+        # TODO bug of missing final count of labelled
+        for curr_AL_epoch in range(args.al_epochs):
+            # AL step
+            self.label_n_elements(AL_sampler, n_to_label)
+            labelled_indices = AL_sampler.labelled_idx_set
+            n_labeled = len(labelled_indices)
 
-                # final train loss (full data)
-                metrics = self.evaluate_model_step(train_data)
-                with self.tf_summary_writer.as_default():
+            logger.info("-" * 118)
+            logger.info(
+                    f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
+                    f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
+                    f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+            # train step
+            train_data = self.get_labelled_train_data(AL_sampler)
+            for epoch in range(1, args.train_epochs+1):
+                self.train_model_step(train_data)
 
-                    for metric_key, metric_value in metrics.items():
-                        tf.summary.scalar(f"train {metric_key}", metric_value, step=n_labeled)
+            # final train loss (full data)
+            train_metrics = self.evaluate_model_step(train_data)
+            self.log_metrics(train_metrics, n_labeled, "train")
 
-                # test metrics
-                metrics = self.evaluate_model_step(test_data)
-                logger.info((
-                    f"Train Data Labeled: {n_labeled}/{train_dataset_size}"
-                    f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"))
-                for metric_key, metric_value in metrics.items():
-                    logger.info(f"Test {metric_key}: {metric_value}")
-                with self.tf_summary_writer.as_default():
-                    for metric_key, metric_value in metrics.items():
-                        tf.summary.scalar(f"test {metric_key}", metric_value, step=n_labeled)
+            # test metrics
+            test_metrics = self.evaluate_model_step(test_data)
+            self.log_metrics(test_metrics, n_labeled, "test")
 
-                # save model
-                if (args.save_model_interval > 0 and
-                    ((curr_AL_epoch+1) % args.save_model_interval == 0)):
-                    model_fpath = os.path.join(
-                        self.model_snapshot_dir,
-                        f"model_AL_epoch_{curr_AL_epoch}_{args.al_epochs}.ckpt")
-                    self.model.save_weights(model_fpath)
-        except KeyboardInterrupt:
-            logger.warning('Exiting from training early!')
-
-        # TODO save metrics as csv
-        # n = np.min((len(labelled_data_counts), len(test_f1_scores), len(test_losses)))
-        # results_df = pd.DataFrame.from_dict({
-        #     "labelled_data_counts": labelled_data_counts[:n],
-        #     "test_f1_scores": test_f1_scores[:n],
-        #     "test_losses": test_losses[:n]})
-        # results_df.to_csv(os.path.join(self.experiment_dir, "test_results.csv"))
-
+            # save model
+            if (args.save_model_interval > 0 and
+                ((curr_AL_epoch+1) % args.save_model_interval == 0)):
+                model_fpath = os.path.join(
+                    self.model_snapshot_dir,
+                    f"model_AL_epoch_{curr_AL_epoch}_{args.al_epochs}.ckpt")
+                self.model.save_weights(model_fpath)
 
 class RandomExperimentManager(ActiveLearningExperimentManagerT):
 
@@ -294,7 +370,6 @@ class LCExperimentManager(ActiveLearningExperimentManagerT):
     def label_n_elements(self, sampler, n_elements):
         sampler.label_n_elements(n_elements, self.model)
 
-
 class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
 
     def _get_sampler(self):
@@ -303,78 +378,67 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
     def label_n_elements(self, sampler, n_elements):
         return sampler.label_n_elements(n_elements, self.model)
 
-    def run_experiment(self):
-        self.start_time = time.monotonic()
+    def log_RL_metrics(self, arm, step):
+        AL_sampler = self.AL_sampler
+        with self.tf_summary_writer.as_default():
+            tf.summary.scalar("Arm selected", arm, step=step)
+            for i, arm_count in enumerate(AL_sampler.arm_count):
+                tf.summary.scalar(
+                    f"{AL_sampler.get_action(i)} arm count", arm_count, step=step)
+        self.logger.info(f"selected {AL_sampler.get_action(arm)}")
+
+    def _run_experiment(self):
         start_time = self.start_time
         args = self.args
         train_data = self.train_data
         test_data = self.test_data
         logger = self.logger
-        AL_sampler = self._get_sampler()
+        AL_sampler = self.AL_sampler
 
         labelled_indices = set()
 
         logger.info(f"Starting {args.experiment_name} experiment")
         n_to_label = int(len(train_data[0]) * args.al_step_percentage)
         train_dataset_size = len(train_data[0])
+
         previous_f1_score = 0
-        try:
-            # TODO bug of missing final count of labelled
-            for curr_AL_epoch in range(args.al_epochs):
-                # AL step
-                arm, _ = self.label_n_elements(AL_sampler, n_to_label)
-                labelled_indices = AL_sampler.labelled_idx_set
-                n_labeled = len(labelled_indices)
 
-                # arm selected
-                with self.tf_summary_writer.as_default():
-                    tf.summary.scalar("Arm selected", arm, step=n_labeled)
-                    for i, arm_count in enumerate(AL_sampler.arm_count):
-                        tf.summary.scalar(f"{AL_sampler.get_action(i)} arm count", arm_count, step=n_labeled)
-                logger.info(f"selected {AL_sampler.get_action(arm)}")
+        # TODO bug of missing final count of labelled
+        for curr_AL_epoch in range(args.al_epochs):
+            # AL step
+            arm, _ = self.label_n_elements(AL_sampler, n_to_label)
+            labelled_indices = AL_sampler.labelled_idx_set
+            n_labeled = len(labelled_indices)
 
-                logger.info("-" * 118)
-                logger.info(
-                        f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
-                        f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
-                        f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
-                # train step
-                train_data = self.get_labelled_train_data(AL_sampler)
-                for epoch in range(1, args.train_epochs+1):
-                    logger.info(f"Train Epoch: {epoch}/{args.train_epochs}"
-                                f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
-                    self.train_model_step(train_data)
+            self.log_RL_metrics(arm, n_labeled)
 
-                # final train loss (full data)
-                train_metrics = self.evaluate_model_step(train_data)
-                with self.tf_summary_writer.as_default():
+            logger.info("-" * 118)
+            logger.info(
+                    f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
+                    f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
+                    f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+            # train step
+            train_data = self.get_labelled_train_data(AL_sampler)
+            for epoch in range(1, args.train_epochs+1):
+                self.train_model_step(train_data)
 
-                    for metric_key, metric_value in train_metrics.items():
-                        tf.summary.scalar(f"train {metric_key}", metric_value, step=n_labeled)
+            # final train loss (full data)
+            train_metrics = self.evaluate_model_step(train_data)
+            self.log_metrics(train_metrics, n_labeled, "train")
 
-                # test metrics
-                metrics = self.evaluate_model_step(test_data)
-                logger.info((
-                    f"Train Data Labeled: {n_labeled}/{train_dataset_size}"
-                    f"\tElapsed Time: {time_display(time.monotonic()-start_time)}"))
-                for metric_key, metric_value in metrics.items():
-                    logger.info(f"Test {metric_key}: {metric_value}")
-                with self.tf_summary_writer.as_default():
-                    for metric_key, metric_value in metrics.items():
-                        tf.summary.scalar(f"test {metric_key}", metric_value, step=n_labeled)
+            # test metrics
+            test_metrics = self.evaluate_model_step(test_data)
+            self.log_metrics(test_metrics, n_labeled, "test")
 
-                # update sampler
-                # reward is delta train f1 metric
-                AL_sampler.update_q_value(arm, train_metrics["f1_score"] - previous_f1_score)
-                previous_f1_score = train_metrics["f1_score"]
-                # TODO maybe add UCB estimate over time
-                # save model
+            # save model
+            if (args.save_model_interval > 0 and
+                ((curr_AL_epoch+1) % args.save_model_interval == 0)):
+                model_fpath = os.path.join(
+                    self.model_snapshot_dir,
+                    f"model_AL_epoch_{curr_AL_epoch}_{args.al_epochs}.ckpt")
+                self.model.save_weights(model_fpath)
 
-                if (args.save_model_interval > 0 and
-                    ((curr_AL_epoch+1) % args.save_model_interval == 0)):
-                    model_fpath = os.path.join(
-                        self.model_snapshot_dir,
-                        f"model_AL_epoch_{curr_AL_epoch}_{args.al_epochs}.ckpt")
-                    self.model.save_weights(model_fpath)
-        except KeyboardInterrupt:
-            logger.warning('Exiting from training early!')
+            # TODO add saving sampler as well
+            AL_sampler.update_q_value(
+                arm, (train_metrics["rare_class_f1_metric"] - previous_f1_score) * previous_f1_score)
+            previous_f1_score = train_metrics["rare_class_f1_metric"]
