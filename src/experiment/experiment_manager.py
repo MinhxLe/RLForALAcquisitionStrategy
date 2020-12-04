@@ -8,6 +8,7 @@ from datetime import datetime
 from sklearn.metrics import f1_score
 
 from src.model.mnist_model import MNISTModel
+from src.model.cifar10_model import Cifar10Model
 from src.sampler import (
     ALRandomSampler,
     LeastConfidenceSampler,
@@ -50,11 +51,24 @@ class ActiveLearningExperimentManagerT(abc.ABC):
 
     def _init_data(self) -> None:
         args = self.args
+        if args.dataset == "mnist":
+            # loads from keras cache
+            (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+            # normalizes the features
+            x_train, x_test = x_train[..., np.newaxis]/255.0, x_test[..., np.newaxis]/255.0
 
-        # loads from keras cache
-        (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
-        # normalizes the features
-        x_train, x_test = x_train[..., np.newaxis]/255.0, x_test[..., np.newaxis]/255.0
+            # change to 1 hot
+            y_train = np.eye(args.model_num_classes)[y_train]
+            y_test = np.eye(args.model_num_classes)[y_test]
+        elif args.dataset == "cifar10":
+            (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+
+            # Normalize pixel values to be between 0 and 1
+            x_train, x_test = x_train / 255.0, x_test / 255.0
+            y_train = np.eye(10)[y_train.flatten()]
+            y_test = np.eye(10)[y_test.flatten()]
+        else:
+            raise NotImplementedError("experiment for dataset not supported")
 
         def build_rare_class_dataset(data, rare_class, rare_class_percentage):
             x, y = data
@@ -72,41 +86,55 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             return (np.concatenate((x_non_rare, x_rare)),
                     np.concatenate((y_non_rare, y_rare)))
 
-        x_train, y_train = build_rare_class_dataset(
-            (x_train, y_train),
-            args.rare_class,
-            args.rare_class_percentage)
+        if args.rare_class:
+            x_train, y_train = build_rare_class_dataset(
+                (x_train, y_train),
+                args.rare_class,
+                args.rare_class_percentage)
 
-        x_test, y_test = build_rare_class_dataset(
-            (x_test, y_test),
-            args.rare_class,
-            args.rare_class_percentage)
-
-        # change to 1 hot
-        y_train = np.eye(args.model_num_classes)[y_train]
-        y_test = np.eye(args.model_num_classes)[y_test]
-
-        # TODO fix
+            x_test, y_test = build_rare_class_dataset(
+                (x_test, y_test),
+                args.rare_class,
+                args.rare_class_percentage)
         if self.args.debug:
-            x_train = x_train[:100]
-            y_train = y_train[:100]
-            y_train[-50:] = 1
-            x_test = x_test[:100]
-            y_test = y_test[:100]
-            y_test[-50:] = 1
+            n_points = 1000
+            idx = np.random.choice(
+                len(x_train), n_points)
+            x_train = x_train[idx]
+            y_train = y_train[idx]
+            idx = np.random.choice(
+                len(x_test), n_points)
+            x_test = x_test[idx]
+            y_test = y_test[idx]
+
+        num_validation = int(len(x_train) * args.validation_percentage)
+        idx = np.random.choice(len(x_train), num_validation)
+        mask = np.ones(len(x_train), np.bool)
+        mask[idx] = 0
+
+        x_val = x_train[~mask]
+        y_val = y_train[~mask]
+        x_train = x_train[mask]
+        y_train = y_train[mask]
 
         # we keep as raw numpy as it's easier to index only the labelled set
         self.train_data = (x_train, y_train)
+        self.val_data = (x_train, y_train)
         self.test_data = (x_test, y_test)
 
     def _get_model(self) -> tf.keras.Model:
         args = self.args
-        return MNISTModel(
-            args.model_num_filters,
-            args.model_filter_size,
-            args.model_pool_size,
-            args.model_num_classes,
-        )
+        if args.dataset == "mnist":
+            return MNISTModel(
+                args.model_num_filters,
+                args.model_filter_size,
+                args.model_pool_size,
+                args.model_num_classes,
+            )
+        elif args.dataset == "cifar10":
+            return Cifar10Model()
+        else:
+            raise NotImplementedError("model for dataset not implemented")
 
     def _get_optimizer(self):
         # TODO add args
@@ -179,9 +207,13 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         optimizer = self.optimizer
         loss_fn = self.loss_fn
 
+        # TODO rely on model compiling here?
         loss_metric = tf.keras.metrics.Mean(name="loss")
-        aggregate_f1_metric = tf.keras.metrics.Mean(name="f1_metric")
-        rare_class_f1_metric = tf.keras.metrics.Mean(name="rare_f1_metric")
+        micro_f1_metric = tf.keras.metrics.Mean(name="micro_f1_metric")
+        macro_f1_metric = tf.keras.metrics.Mean(name="macro_f1_metric")
+        accuracy_metric = tf.keras.metrics.Accuracy(name="accuracy_metric")
+        if args.rare_class:
+            rare_class_f1_metric = tf.keras.metrics.Mean(name="rare_f1_metric")
 
         test_x, test_y = data
         data_size = len(test_x)
@@ -195,6 +227,13 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             raw_prediction = model(batch_x, training=False)
             loss_metric(loss_fn(batch_y, raw_prediction))
 
+            # min class ratio
+            min_class_prediction_ratio = np.min(total_prediction_count)/data_size
+            min_class_true_ratio = np.min(total_true_label_count)/data_size
+
+            # max class ratio
+            max_class_prediction_ratio = np.max(total_prediction_count)/data_size
+            max_class_true_ratio = np.max(total_true_label_count)/data_size
 
             prediction = np.argmax(raw_prediction, axis=1)
             unique, counts = np.unique(prediction, return_counts=True)
@@ -206,39 +245,39 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             for i, count in zip(unique, counts):
                 total_true_label_count[i] += count
 
-            aggregate_f1_metric(
+            micro_f1_metric(
                 f1_score(batch_y, prediction, average="micro", labels=np.arange(10)))
+            macro_f1_metric(
+                f1_score(batch_y, prediction, average="macro", labels=np.arange(10)))
+            accuracy_metric(batch_y, prediction)
+            if args.rare_class:
+                rare_class_f1_metric(
+                    f1_score(batch_y, prediction, average=None, labels=np.arange(10))[args.rare_class])
+                rare_class_count += len(batch_y[batch_y==args.rare_class])
 
-            rare_class_f1_metric(
-                f1_score(batch_y, prediction, average=None, labels=np.arange(10))[args.rare_class])
-            rare_class_count += len(batch_y[batch_y==args.rare_class])
 
-        # # min class ratio
-        # min_class_prediction_ratio = np.min(total_prediction_count)/data_size
-        # min_class_true_ratio = np.min(total_true_label_count)/data_size
-
-        # # max class ratio
-        # max_class_prediction_ratio = np.max(total_prediction_count)/data_size
-        # max_class_true_ratio = np.max(total_true_label_count)/data_size
-
-        # rare class ratio
-        rare_class_prediction_ratio = total_prediction_count[args.rare_class]/data_size
-        rare_class_true_ratio = total_true_label_count[args.rare_class]/data_size
-
-        return {
+        result = {
             "loss": loss_metric.result(),
-            "aggregate_f1_metric": aggregate_f1_metric.result(),
-            "rare_class_f1_metric": rare_class_f1_metric.result(),
-            # "min_class_prediction_ratio": min_class_prediction_ratio,
-            # "min_class_true_ratio": min_class_true_ratio,
-            # "max_class_prediction_ratio": max_class_prediction_ratio,
-            # "max_class_true_ratio": max_class_true_ratio,
-            # "max_class_prediction_ratio": max_class_prediction_ratio,
-            # "max_class_true_ratio": max_class_true_ratio,
-            "rare_class_prediction_ratio": rare_class_prediction_ratio,
-            "rare_class_true_ratio": rare_class_true_ratio,
-            "rare_class_count": rare_class_count,
+            "micro_f1_metric": micro_f1_metric.result(),
+            "macro_f1_metric": macro_f1_metric.result(),
+            "accuracy_metric": accuracy_metric.result(),
+            "min_class_prediction_ratio": min_class_prediction_ratio,
+            "min_class_true_ratio": min_class_true_ratio,
+            "max_class_prediction_ratio": max_class_prediction_ratio,
+            "max_class_true_ratio": max_class_true_ratio,
+
         }
+        if args.rare_class:
+            # rare class ratio
+            rare_class_prediction_ratio = total_prediction_count[args.rare_class]/data_size
+            rare_class_true_ratio = total_true_label_count[args.rare_class]/data_size
+            result.update({
+                "rare_class_f1_metric": rare_class_f1_metric.result(),
+                "rare_class_prediction_ratio": rare_class_prediction_ratio,
+                "rare_class_true_ratio": rare_class_true_ratio,
+                "rare_class_count": rare_class_count,
+            })
+        return result
 
     def log_metrics(
             self,
@@ -273,12 +312,8 @@ class ActiveLearningExperimentManagerT(abc.ABC):
     def run_experiment(self):
         try:
             for _ in range(self.args.n_experiment_runs):
-                try:
-                    self._init_experiment()
-                    self._run_experiment()
-                except:
-                    self.logger.warning("RUN FAILED")
-                    print("RUN FAILED")
+                self._init_experiment()
+                self._run_experiment()
         except KeyboardInterrupt:
             self.logger.warning('Exiting from training early!')
 
@@ -317,7 +352,8 @@ class ActiveLearningExperimentManagerT(abc.ABC):
         labelled_indices = set()
 
         logger.info(f"Starting {args.experiment_name} experiment")
-        n_to_label = int(len(train_data[0]) * args.al_step_percentage)
+        n_to_label = int((len(train_data[0]) * args.al_step_percentage))
+
         train_dataset_size = len(train_data[0])
 
         # TODO bug of missing final count of labelled
@@ -333,10 +369,12 @@ class ActiveLearningExperimentManagerT(abc.ABC):
                     f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
                     f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
             # train step
+            if args.retrain_model_from_scratch:
+                self.model = self._get_model()
+
             train_data = self.get_labelled_train_data(AL_sampler)
             for epoch in range(1, args.train_epochs+1):
                 self.train_model_step(train_data)
-
             # final train loss (full data)
             train_metrics = self.evaluate_model_step(train_data)
             self.log_metrics(train_metrics, n_labeled, "train")
@@ -370,22 +408,49 @@ class LCExperimentManager(ActiveLearningExperimentManagerT):
     def label_n_elements(self, sampler, n_elements):
         sampler.label_n_elements(n_elements, self.model)
 
-class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
 
-    def _get_sampler(self):
-        return UCBBanditSampler(self.train_data[0])
-
-    def label_n_elements(self, sampler, n_elements):
-        return sampler.label_n_elements(n_elements, self.model)
-
-    def log_RL_metrics(self, arm, step):
+class RLExperimentManagerT(ActiveLearningExperimentManagerT):
+    def log_RL_metrics(self, step):
         AL_sampler = self.AL_sampler
         with self.tf_summary_writer.as_default():
-            tf.summary.scalar("Arm selected", arm, step=step)
+            tf.summary.scalar("Action selected", self.action, step=step)
             for i, arm_count in enumerate(AL_sampler.arm_count):
                 tf.summary.scalar(
-                    f"{AL_sampler.get_action(i)} arm count", arm_count, step=step)
-        self.logger.info(f"selected {AL_sampler.get_action(arm)}")
+                    f"{AL_sampler.get_action(i)} action count", arm_count, step=step)
+        self.logger.info(f"selected {AL_sampler.get_action(self.action)}")
+        # TODO add in CSV to log arm + sampler state
+
+    def _init_experiment(self):
+        super()._init_experiment()
+        self.reward = None # keeps track of reward
+        self.state = None  # and state
+        self.action = None # track of most recent action
+
+        # these are all thigns relevent to compute ^
+        self.val_metrics = None
+
+    @abc.abstractmethod
+    def update_state(self):
+        """
+        updates state of system  and sets it in self.state
+        we store reward in part of class since we don't know what we need to keep track of
+        in actual experiment
+        """
+        ...
+
+    @abc.abstractmethod
+    def update_reward(self):
+        """
+        updates reward and set its in self.reward
+        we store reward in part of class since we don't know what we need to keep track of
+        in actual experiment
+        """
+        ...
+
+    @abc.abstractmethod
+    def update_agent_sampler(self, sampler, action, reward, state):
+        # TODO add in batch option (?)
+        ...
 
     def _run_experiment(self):
         start_time = self.start_time
@@ -401,22 +466,20 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
         n_to_label = int(len(train_data[0]) * args.al_step_percentage)
         train_dataset_size = len(train_data[0])
 
-        previous_f1_score = 0
-
         # TODO bug of missing final count of labelled
         for curr_AL_epoch in range(args.al_epochs):
             # AL step
-            arm, _ = self.label_n_elements(AL_sampler, n_to_label)
+            self.action, _ = self.label_n_elements(AL_sampler, n_to_label)
             labelled_indices = AL_sampler.labelled_idx_set
             n_labeled = len(labelled_indices)
 
-            self.log_RL_metrics(arm, n_labeled)
-
             logger.info("-" * 118)
+            self.log_RL_metrics(n_labeled)
             logger.info(
                     f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
                     f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
                     f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+
             # train step
             train_data = self.get_labelled_train_data(AL_sampler)
             for epoch in range(1, args.train_epochs+1):
@@ -430,6 +493,17 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
             test_metrics = self.evaluate_model_step(test_data)
             self.log_metrics(test_metrics, n_labeled, "test")
 
+            val_metrics = self.evaluate_model_step(self.val_data)
+            self.log_metrics(val_metrics, n_labeled, "val")
+            self.val_metrics = val_metrics
+
+            self.update_reward()
+            self.update_state()
+            self.update_agent_sampler(
+                AL_sampler, self.action, self.reward, self.state)
+
+            # TODO save RL agent
+
             # save model
             if (args.save_model_interval > 0 and
                 ((curr_AL_epoch+1) % args.save_model_interval == 0)):
@@ -438,7 +512,29 @@ class UCBBanditExperimentManager(ActiveLearningExperimentManagerT):
                     f"model_AL_epoch_{curr_AL_epoch}_{args.al_epochs}.ckpt")
                 self.model.save_weights(model_fpath)
 
-            # TODO add saving sampler as well
-            AL_sampler.update_q_value(
-                arm, (train_metrics["rare_class_f1_metric"] - previous_f1_score) * previous_f1_score)
-            previous_f1_score = train_metrics["rare_class_f1_metric"]
+class UCBBanditExperimentManager(RLExperimentManagerT):
+    def __init__(self, args):
+        assert args.reward_metric_name is not None
+        super().__init__(args)
+
+    def _get_sampler(self):
+        return UCBBanditSampler(self.train_data[0])
+
+    def label_n_elements(self, sampler, n_elements):
+        return sampler.label_n_elements(n_elements, self.model)
+
+    def _init_experiment(self):
+        super()._init_experiment()
+        self.previous_metric_value = 0
+
+    def update_state(self):
+        self.state = None
+
+    def update_reward(self):
+        curr_metric_value = self.val_metrics[self.args.reward_metric_name]
+        # TODO explore scaling down based on state
+        self.reward = curr_metric_value - self.previous_metric_value
+        self.previous_metric_value = curr_metric_value
+
+    def update_agent_sampler(self, sampler, action, reward, state):
+        self.AL_sampler.update_q_value(self.action, reward)
