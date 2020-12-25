@@ -21,7 +21,9 @@ from src.utils.log_utils import (
 from src.utils.utils import (
     batch_sample_indices,
 )
-
+config = tf.compat.v1.ConfigProto()
+config.gpu_options.allow_growth = True
+session = tf.compat.v1.Session(config=config)
 
 class ActiveLearningExperimentManagerT(abc.ABC):
     """
@@ -57,18 +59,27 @@ class ActiveLearningExperimentManagerT(abc.ABC):
             # normalizes the features
             x_train, x_test = x_train[..., np.newaxis]/255.0, x_test[..., np.newaxis]/255.0
 
-            # change to 1 hot
-            y_train = np.eye(args.model_num_classes)[y_train]
-            y_test = np.eye(args.model_num_classes)[y_test]
         elif args.dataset == "cifar10":
             (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
 
             # Normalize pixel values to be between 0 and 1
             x_train, x_test = x_train / 255.0, x_test / 255.0
-            y_train = np.eye(10)[y_train.flatten()]
-            y_test = np.eye(10)[y_test.flatten()]
+            y_train = y_train.flatten()
+            y_test = y_test.flatten()
         else:
             raise NotImplementedError("experiment for dataset not supported")
+
+        # debug datset
+        if self.args.debug:
+            n_points = 1000
+            idx = np.random.choice(
+                len(x_train), n_points)
+            x_train = x_train[idx]
+            y_train = y_train[idx]
+            idx = np.random.choice(
+                len(x_test), n_points)
+            x_test = x_test[idx]
+            y_test = y_test[idx]
 
         def build_rare_class_dataset(data, rare_class, rare_class_percentage):
             x, y = data
@@ -85,7 +96,6 @@ class ActiveLearningExperimentManagerT(abc.ABC):
 
             return (np.concatenate((x_non_rare, x_rare)),
                     np.concatenate((y_non_rare, y_rare)))
-
         if args.rare_class:
             x_train, y_train = build_rare_class_dataset(
                 (x_train, y_train),
@@ -96,17 +106,12 @@ class ActiveLearningExperimentManagerT(abc.ABC):
                 (x_test, y_test),
                 args.rare_class,
                 args.rare_class_percentage)
-        if self.args.debug:
-            n_points = 1000
-            idx = np.random.choice(
-                len(x_train), n_points)
-            x_train = x_train[idx]
-            y_train = y_train[idx]
-            idx = np.random.choice(
-                len(x_test), n_points)
-            x_test = x_test[idx]
-            y_test = y_test[idx]
 
+        # change to 1 hot
+        y_train = np.eye(10)[y_train]
+        y_test = np.eye(10)[y_test]
+
+        # build validation dataset
         num_validation = int(len(x_train) * args.validation_percentage)
         idx = np.random.choice(len(x_train), num_validation)
         mask = np.ones(len(x_train), np.bool)
@@ -368,6 +373,7 @@ class ActiveLearningExperimentManagerT(abc.ABC):
                     f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
                     f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
                     f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+
             # train step
             if args.retrain_model_from_scratch:
                 self.model = self._get_model()
@@ -414,10 +420,12 @@ class RLExperimentManagerT(ActiveLearningExperimentManagerT):
         AL_sampler = self.AL_sampler
         with self.tf_summary_writer.as_default():
             tf.summary.scalar("Action selected", self.action, step=step)
+            tf.summary.scalar("Reward", self.reward, step=step)
             for i, arm_count in enumerate(AL_sampler.arm_count):
                 tf.summary.scalar(
                     f"{AL_sampler.get_action(i)} action count", arm_count, step=step)
         self.logger.info(f"selected {AL_sampler.get_action(self.action)}")
+        self.logger.info(f"reward: {self.reward}")
         # TODO add in CSV to log arm + sampler state
 
     def _init_experiment(self):
@@ -474,11 +482,14 @@ class RLExperimentManagerT(ActiveLearningExperimentManagerT):
             n_labeled = len(labelled_indices)
 
             logger.info("-" * 118)
-            self.log_RL_metrics(n_labeled)
             logger.info(
                     f"AL Epoch: {curr_AL_epoch+1}/{args.al_epochs}"
                     f"\tTrain Data Labeled: {n_labeled}/{train_dataset_size}"
                     f"\tElapsed Time: {time_display(time.monotonic()-start_time)}")
+
+            # train step
+            if args.retrain_model_from_scratch:
+                self.model = self._get_model()
 
             # train step
             train_data = self.get_labelled_train_data(AL_sampler)
@@ -502,6 +513,7 @@ class RLExperimentManagerT(ActiveLearningExperimentManagerT):
             self.update_agent_sampler(
                 AL_sampler, self.action, self.reward, self.state)
 
+            self.log_RL_metrics(n_labeled)
             # TODO save RL agent
 
             # save model

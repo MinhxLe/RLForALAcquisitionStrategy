@@ -19,8 +19,8 @@ parser.add_argument('--model_num_classes', type=int, default=10)
 
 # train args
 parser.add_argument('--batch_size', type=int, default=32)
-parser.add_argument('--train_epochs', type=int, default=5, help="number of train epochs per al step")
-parser.add_argument('--retrain_model_from_scratch', type=bool, default=True, help="retrain model from scratch per AL step")
+parser.add_argument('--train_epochs', type=int, default=1, help="number of train epochs per al step")
+parser.add_argument('--retrain_model_from_scratch', type=bool, default=False, help="retrain model from scratch per AL step")
 # parser.add_argument('--learning_rate', type=int, default=0.01)
 
 # log args
@@ -35,10 +35,10 @@ parser.add_argument('--dataset', type=str, help='dataset selector', default='cif
 parser.add_argument('--al_sampler', type=str)
 parser.add_argument('--al_epochs', type=int, default=100)
 parser.add_argument("--seed", type=int, default=42, help="random seed")
-parser.add_argument("--n_experiment_runs", type=int, default=1, help="number of times to run experiment")
+parser.add_argument("--n_experiment_runs", type=int, default=10, help="number of times to run experiment")
 parser.add_argument('--al_step_percentage', type=float, default=0.005, help="percentage of data to be labelled per timestep")
-parser.add_argument("--rare_class", type=int, default=None, help="which class is rare")
-parser.add_argument("--rare_class_percentage", type=float, default=None, help="percentage of rare class data to keep to simulate a class imbalance scenario")
+parser.add_argument("--rare_class", type=int, default=9, help="which class is rare")
+parser.add_argument("--rare_class_percentage", type=float, default=0.25, help="percentage of rare class data to keep to simulate a class imbalance scenario")
 
 # only relevent to bandit/RL type samplers
 parser.add_argument('--reward_metric_name', type=str, default=None, help='only relevent for UCB bandit sampler')

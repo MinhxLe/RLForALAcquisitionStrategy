@@ -1,10 +1,12 @@
-import heapq
 import numpy as np
 import random
 
 from src.utils.utils import (
     batch_sample_slices,
     batch_sample_indices,
+)
+from src.utils.fixed_heap import (
+    FixedHeap,
 )
 from typing import List
 import numpy as np
@@ -44,30 +46,6 @@ class ALRandomSampler(ActiveLearningSamplerT):
         self.labelled_idx_set |= new_labels
         self.unlabelled_idx_set -= new_labels
         return n_sampled
-
-
-class FixedHeap:
-    def __init__(self, key=lambda x:x):
-        # https://stackoverflow.com/questions/8875706/heapq-with-custom-compare-predicate
-        self.key = key
-        self._heap = []
-        self.index = 0
-
-    def __len__(self):
-        return len(self._heap)
-
-    def data_to_heap_data(self, data):
-        return (self.key(data), self.index, data)
-
-    def push(self, data):
-        heapq.heappush(self._heap, self.data_to_heap_data(data))
-        self.index += 1
-
-    def top(self):
-        return self._heap[0][2]
-
-    def pop(self):
-        return heapq.heappop(self._heap)[2]
 
 
 class LeastConfidenceSampler(ActiveLearningSamplerT):
@@ -173,3 +151,6 @@ class UCBBanditSampler(ActiveLearningSamplerT):
         # running avg
         # TODO we can probably can do more aggressive score decay
         self.q_value[arm] += (reward - self.q_value[arm])/self.arm_count[arm]
+
+class RLSampler(ActiveLearningSamplerT):
+    pass
