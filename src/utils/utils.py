@@ -1,3 +1,4 @@
+import numpy as np
 import tensorflow as tf
 
 
@@ -19,3 +20,6 @@ def batch_sample_indices(n_elements, batch_size=32, shuffle=True):
     for batch in dataset.as_numpy_iterator():
         yield batch
 
+
+def to_onehot(y, n_classes):
+    return np.eye(n_classes)[y]
