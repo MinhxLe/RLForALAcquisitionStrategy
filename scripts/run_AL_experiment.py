@@ -40,16 +40,16 @@ ARGS = dict(
     n_train_epochs=10,
 
     # al_agent
-    agent_type="LC",
+    agent_type="random",
 
     # session manager
-    al_epochs=20,
+    al_epochs=30,
     al_step_percentage=0.01,
-    warm_start_percentage=0,
+    warm_start_percentage=0.01,
     retrain_model=True,
 
     random_seed=42,  # TODO use this
-    n_session_runs=1,
+    n_session_runs=5,
 
     # session dir log args
     save_model_interval=10,
@@ -64,6 +64,7 @@ ARGS["n_classes"] = len(ARGS["classes"])
 session_args = []
 args_for_name=[
     "classes",
+    "class_ratio",
     "al_epochs",
     "al_step_percentage",
     "warm_start_percentage",

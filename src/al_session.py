@@ -109,6 +109,7 @@ class ClassiferALSessionManager:
         evaluates model and input, prediction, and true label
         """
         x, y = self.al_manager.get_dataset(data_type)
+        data_size = x.shape[0]
 
         # TODO rely on model compiling here?
         loss_metric = tf.keras.metrics.Mean(name="loss")
@@ -123,10 +124,8 @@ class ClassiferALSessionManager:
         total_true_label_count = None
         cm = None
 
-
         for batch_x, batch_y, raw_prediction, batch_loss in \
                 self.al_env.model_manager.evaluate_model(x, y):
-
             loss_metric.update_state(batch_loss)
 
             # dynamically getting number of class
@@ -143,9 +142,9 @@ class ClassiferALSessionManager:
             total_true_label_count += np.sum(batch_y, axis=0)
             batch_y = np.argmax(batch_y, axis=1)  # 1 hot to class
             if cm is None:
-                cm = confusion_matrix = confusion_matrix(batch_y, prediction)
+                cm = confusion_matrix(batch_y, prediction, labels=np.arange(model_num_classes))
             else:
-                cm += confusion_matrix(batch_y, prediction)
+                cm += confusion_matrix(batch_y, prediction, labels=np.arange(model_num_classes))
             micro_f1_metric.update_state(
                 f1_score(batch_y, prediction, average="micro", labels=np.arange(model_num_classes)))
             macro_f1_metric.update_state(
@@ -191,8 +190,7 @@ class ClassiferALSessionManager:
             writer.writerow(metrics)
 
         # dumping confusion_matrix
-        cm = cm.flatten()
-        data = np.array([step]) + cm
+        data = np.expand_dims(np.append([step], cm.flatten()), 0)
         cm_file = os.path.join(self.run_dir, f"{data_type}_confusion_matrix.csv")
         with open(cm_file, 'a') as f:
             np.savetxt(f, data, delimiter=",")
